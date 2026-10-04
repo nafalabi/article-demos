@@ -1,0 +1,25 @@
+services:
+  traefik:
+    image: traefik:v3.7.13
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --log.level=INFO
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./dynamic:/etc/traefik/dynamic:ro
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    name: traefik

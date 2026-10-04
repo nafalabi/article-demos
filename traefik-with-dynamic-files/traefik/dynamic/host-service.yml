@@ -1,0 +1,13 @@
+http:
+  routers:
+    host-service:
+      entryPoints:
+        - web
+      rule: "Host(`host-service.localhost`)"
+      service: host-service
+
+  services:
+    host-service:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:8000"

@@ -17,6 +17,8 @@ services:
       - "8080:8080"
     volumes:
       - ./dynamic:/etc/traefik/dynamic:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - traefik
 

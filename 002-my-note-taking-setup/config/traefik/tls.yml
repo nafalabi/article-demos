@@ -1,0 +1,12 @@
+# The certificate Traefik serves. Routers set `tls=true`; the right certificate
+# is picked by SNI against the names in it. Paths are inside the container,
+# where ./certs is mounted read-only.
+tls:
+  certificates:
+    - certFile: /certs/notes-demo.pem
+      keyFile: /certs/notes-demo-key.pem
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/notes-demo.pem
+        keyFile: /certs/notes-demo-key.pem

@@ -1,0 +1,5 @@
+.env
+certs/
+data/
+config/authelia/users_database.yml
+config/git-ui/repos.conf

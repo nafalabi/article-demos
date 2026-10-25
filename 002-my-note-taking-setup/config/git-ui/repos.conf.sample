@@ -1,0 +1,4 @@
+# Copy to repos.conf (gitignored). One vault per line:
+#   <display name>|<path appended to GIT_REMOTE_BASE_URL>|<branch>
+# The name must match a directory under /vaults.
+My Vault|Personal/obsidian_notes.git|main

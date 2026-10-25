@@ -2,9 +2,8 @@
 # Prepares the browser git UI: installs lazygit and ttyd, points each vault at
 # its git remote, then serves lazygit over ttyd.
 #
-# Authentication is not handled here: Traefik's ForwardAuth middleware injects
-# the Remote-User header from Authelia, and ttyd treats that header as the
-# authenticated client identity.
+# Authentication is not handled here: this demo leaves the terminal open on the
+# LAN, behind Traefik's TLS entrypoint.
 set -eu
 
 if ! command -v git >/dev/null 2>&1; then echo "git not found in image" >&2; exit 1; fi
@@ -68,4 +67,4 @@ while IFS='|' read -r name path branch; do
   fi
 done < /opt/git-ui/repos.conf
 
-exec ttyd -W -p "$GIT_UI_PORT" -H Remote-User -t "titleFixed=Ignis Git" /opt/git-ui/menu.sh
+exec ttyd -W -p "$GIT_UI_PORT" -t "titleFixed=Ignis Git" /opt/git-ui/menu.sh

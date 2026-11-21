@@ -41,28 +41,50 @@ git config --global user.email "$GIT_EMAIL"
 git config --global --add safe.directory '*'
 git config --global init.defaultBranch main
 
-inject_creds() {
-  case "$1" in
-    https://*) printf '%s' "$1" | sed "s#^https://#https://${GIT_USER}:${GIT_TOKEN}@#" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
+git config --global credential.helper '!f() { printf "username=%s\npassword=%s\n" "$GIT_USER" "$GIT_TOKEN"; }; f'
+clean_url() { printf '%s' "$1" | sed -E 's#^(https?://)[^/@:]+:[^/@]*@#\1#'; }
+
+# Older versions embedded credentials in each origin URL. Strip them before
+# anything else, including for vaults that are no longer in repos.conf.
+for config in /vaults/*/.git/config; do
+  [ -f "$config" ] || continue
+  dir=$(dirname "$(dirname "$config")")
+  if current=$(git -C "$dir" remote get-url origin 2>/dev/null); then
+    cleaned=$(clean_url "$current")
+    if [ "$cleaned" != "$current" ]; then
+      git -C "$dir" remote set-url origin "$cleaned"
+    fi
+  fi
+done
 
 while IFS='|' read -r name path branch; do
   case "$name" in ''|\#*) continue ;; esac
   dir="/vaults/$name"
   remote="${GIT_REMOTE_BASE_URL%/}/$path"
+  case "$remote" in
+    *CHANGE_ME*) remote_configured=false ;;
+    *) remote_configured=true ;;
+  esac
   if [ ! -d "$dir" ]; then echo "skip missing vault dir: $dir"; continue; fi
   if [ ! -d "$dir/.git" ]; then
-    case "$remote" in *CHANGE_ME*) echo "skip $name: remote not configured"; continue ;; esac
+    if [ "$remote_configured" = false ]; then echo "skip $name: remote not configured"; continue; fi
     echo "initializing $name -> $branch"
     git -C "$dir" init -b "$branch"
-    git -C "$dir" remote add origin "$(inject_creds "$remote")"
+    git -C "$dir" remote add origin "$remote"
   else
-    if git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-      git -C "$dir" remote set-url origin "$(inject_creds "$remote")"
+    if current=$(git -C "$dir" remote get-url origin 2>/dev/null); then
+      if [ "$remote_configured" = true ]; then
+        git -C "$dir" remote set-url origin "$remote"
+      else
+        cleaned=$(clean_url "$current")
+        if [ "$cleaned" != "$current" ]; then
+          git -C "$dir" remote set-url origin "$cleaned"
+        fi
+      fi
+    elif [ "$remote_configured" = true ]; then
+      git -C "$dir" remote add origin "$remote"
     else
-      case "$remote" in *CHANGE_ME*) echo "skip $name: remote not configured" ;; *) git -C "$dir" remote add origin "$(inject_creds "$remote")" ;; esac
+      echo "skip $name: remote not configured"
     fi
   fi
 done < /opt/git-ui/repos.conf

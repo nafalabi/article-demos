@@ -103,6 +103,10 @@ services:
       - "off"
       - --dir-cache-time
       - 5s
+      - --exclude
+      - "/.git/**"
+      - --exclude
+      - "/**/.git/**"
     volumes:
       - ./data/vaults:/vaults
     labels:
@@ -161,6 +165,38 @@ services:
       timeout: 5s
       retries: 5
       start_period: 120s
+    networks:
+      - notes
+
+  git-mcp:
+    build: ./git-mcp
+    container_name: notes-mcp
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}
+      MCP_GIT_TOKEN: ${MCP_GIT_TOKEN:-}
+      GIT_USER: ${GIT_USER:-}
+      GIT_REMOTE_BASE_URL: ${GIT_REMOTE_BASE_URL:-CHANGE_ME_GIT_BASE_URL}
+      MCP_GIT_AUTHOR_NAME: ${MCP_GIT_AUTHOR_NAME:-hermes}
+      MCP_GIT_AUTHOR_EMAIL: ${MCP_GIT_AUTHOR_EMAIL:-hermes@homelab.local}
+      MCP_PUBLIC_HOST: ignis-mcp.${HOST_IP:?set HOST_IP in .env}.sslip.io
+    volumes:
+      - ./data/vaults:/vaults
+      - ./config/git-ui:/opt/git-ui:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.git-mcp.entrypoints=websecure
+      - traefik.http.routers.git-mcp.rule=Host(`ignis-mcp.${HOST_IP:?set HOST_IP in .env}.sslip.io`)
+      - traefik.http.routers.git-mcp.service=git-mcp
+      - traefik.http.routers.git-mcp.tls=true
+      - traefik.http.services.git-mcp.loadbalancer.server.port=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - notes
 

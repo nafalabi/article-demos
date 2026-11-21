@@ -1,13 +1,14 @@
 # Note-Taking Stack — Setup Guide
 
-Four containers, three hostnames, one directory of markdown files. This guide
+Five containers, four hostnames, one directory of markdown files. This guide
 takes you from nothing to a working setup, and explains how the pieces fit
 together as it goes.
 
-Authentication is deliberately out of scope. The demo assumes a trusted LAN;
-WebDAV keeps its own basic auth because its clients need a username and
-password. SSO is a separate article, so the pieces here stay focused on Ignis,
-WebDAV, and the git UI.
+Authentication is deliberately out of scope for the browser apps. The demo
+assumes a trusted LAN; WebDAV keeps its own basic auth because its clients need
+a username and password, and the MCP endpoint requires a bearer token because it
+can push. SSO is a separate article, so the pieces here stay focused on Ignis,
+WebDAV, the git UI, and the MCP endpoint.
 
 ## What you get
 
@@ -17,30 +18,33 @@ WebDAV, and the git UI.
 | `ignis` | `nobbe/ignis:0.8.10` | Obsidian, running in the browser |
 | `webdav` | `rclone/rclone:1.75.0` | the same vault over WebDAV, for phone and desktop |
 | `git-ui` | `alpine/git:v2.54.0` | lazygit in the browser (lazygit 0.64.1 + ttyd 1.7.7) |
+| `git-mcp` | built locally from `git-mcp/` | MCP git tools for external agents |
 
 ### How they work together
 
 ```
 browser ─▶ traefik :443 ─▶ ignis  :8080 ─┐
 phone   ─▶ traefik :443 ─▶ webdav :8081 ─┼─▶ ./data/vaults
-browser ─▶ traefik :443 ─▶ git-ui :7681 ─┘
+browser ─▶ traefik :443 ─▶ git-ui :7681 ─┤
+agent   ─▶ traefik :443 ─▶ git-mcp :8080 ─┘
 ```
 
 - **Traefik is the only container with published ports** (`:80` and `:443`). The
-  other three are unreachable from outside the Docker network.
-- **Three consumers, one directory.** `ignis`, `webdav`, and `git-ui` all mount
-  the same host path, `./data/vaults`. That is the whole point: a note written in
-  the browser is the same file your phone syncs over WebDAV and the same file the
-  git UI commits.
-- **Only WebDAV asks for a password**, because WebDAV clients expect one. The two
-  browser apps are open, which is the trade-off this demo makes to keep the
-  configuration readable:
+  other four are unreachable from outside the Docker network.
+- **Four consumers, one directory.** `ignis`, `webdav`, `git-ui`, and `git-mcp`
+  all mount the same host path, `./data/vaults`. That is the whole point: a note
+  written in the browser is the same file your phone syncs over WebDAV and the
+  same file the git UI or an agent commits.
+- **WebDAV asks for a password and MCP asks for a bearer token.** The two browser
+  apps are open, which is the trade-off this demo makes to keep the configuration
+  readable:
 
 | Host | Serves | Auth |
 | --- | --- | --- |
 | `ignis.<HOST_IP>.sslip.io` | Obsidian in the browser | — |
 | `ignis-git.<HOST_IP>.sslip.io` | lazygit in the browser | — |
 | `ignis-webdav.<HOST_IP>.sslip.io` | the vault over WebDAV | HTTP basic auth (WebDAV clients) |
+| `ignis-mcp.<HOST_IP>.sslip.io` | vault git tools over MCP | Bearer token |
 
 ## 1. What you need
 
@@ -48,7 +52,7 @@ browser ─▶ traefik :443 ─▶ git-ui :7681 ─┘
 - `mkcert` — and once per machine, `mkcert -install` so browsers trust it
 - ports **80** and **443** free — `ss -ltn | grep -E ':(80|443)\s'` prints nothing
 - internet on first start: Ignis downloads Obsidian, the git UI downloads lazygit
-  and ttyd
+  and ttyd, and the MCP image installs its Python dependencies
 
 ### Why there is TLS at all
 
@@ -76,7 +80,21 @@ $EDITOR .env
 | `HOST_IP` | this machine's LAN address; every hostname and the certificate come from it |
 | `TZ` | your timezone |
 | `WEBDAV_USER`, `WEBDAV_PASS` | credentials for WebDAV clients (phone/desktop) |
-| `GIT_REMOTE_BASE_URL`, `GIT_USER`, `GIT_TOKEN` | your git server (step 7; can stay unset at first) |
+| `GIT_REMOTE_BASE_URL`, `GIT_USER`, `GIT_TOKEN` | your git server for the git UI (step 7; can stay unset at first) |
+| `MCP_AUTH_TOKEN` | bearer token clients present to the MCP endpoint; required, 32+ random hex chars |
+| `MCP_GIT_TOKEN` | the MCP server's own push token; separate from `GIT_TOKEN` so it can be revoked independently |
+| `MCP_GIT_AUTHOR_NAME`, `MCP_GIT_AUTHOR_EMAIL` | author identity attached to agent commits (defaults: `hermes`, `hermes@homelab.local`) |
+
+Generate each token with:
+
+```bash
+openssl rand -hex 32
+```
+
+If an earlier version of this stack ran on this host, rotate `GIT_TOKEN` after
+upgrading. The old `run.sh` wrote it into every vault's `.git/config`, and WebDAV
+served that directory. Startup now strips embedded credentials automatically, but
+only rotation makes a previously exposed token safe.
 
 Find your address with:
 
@@ -96,15 +114,18 @@ Creating the directories yourself avoids that.
 
 ## 4. Create the certificate
 
-mkcert signs a certificate for the three hostnames:
+mkcert signs a certificate for the four hostnames:
 
 ```bash
 mkcert -cert-file certs/notes-demo.pem -key-file certs/notes-demo-key.pem \
   ignis.192.168.1.12.sslip.io ignis-webdav.192.168.1.12.sslip.io \
-  ignis-git.192.168.1.12.sslip.io
+  ignis-git.192.168.1.12.sslip.io ignis-mcp.192.168.1.12.sslip.io
 
 mkcert -install      # once per machine
 ```
+
+If a certificate from an earlier version already exists, reissue it: the MCP
+hostname must be in the SAN list or clients reject the connection.
 
 ```
 Created a new certificate valid for the following names 📜
@@ -126,12 +147,13 @@ docker compose ps
 NAME             IMAGE                       SERVICE    STATUS                    PORTS
 notes-git        alpine/git:v2.54.0          git-ui     Up 1 minute (healthy)
 notes-ignis      nobbe/ignis:0.8.10          ignis      Up 1 minute (healthy)     8080/tcp
+notes-mcp        notes-demo-git-mcp:latest   git-mcp    Up 1 minute (healthy)     8080/tcp
 notes-traefik    traefik:v3.7.13             traefik    Up 1 minute (healthy)     :80->80/tcp, :443->443/tcp, 127.0.0.1:8080->8080/tcp
 notes-webdav     rclone/rclone:1.75.0        webdav     Up 1 minute (healthy)
 ```
 
 Two things to read in that table: every service says `(healthy)`, and only
-`notes-traefik` publishes ports — that is the single door. The four `STATUS`
+`notes-traefik` publishes ports — that is the single door. The five `STATUS`
 lines are what `docker compose ps` prints on one line each if the table is too
 wide for your terminal:
 
@@ -139,8 +161,9 @@ wide for your terminal:
 docker compose ps --format '{{.Name}} {{.Status}}'
 ```
 
-The first start is slower — Ignis pulls Obsidian from upstream and the git UI
-pulls lazygit and ttyd. Watch it happen with `docker compose logs -f`.
+The first start is slower — Ignis pulls Obsidian from upstream, the git UI pulls
+lazygit and ttyd, and Compose builds the MCP image. Watch it happen with
+`docker compose logs -f`.
 
 ## 6. First run: write a note
 
@@ -153,8 +176,10 @@ pulls lazygit and ttyd. Watch it happen with `docker compose logs -f`.
 ls "data/vaults/My Vault/"
 ```
 
-That file is the demo's whole claim: it now exists once, and three different
-clients can read and write it.
+That file is the demo's whole claim: it now exists once, and four different
+clients can read and write it. The vault's `.git` directory is intentionally
+hidden from WebDAV, so clients see notes and attachments, not repository
+internals or credentials.
 
 ## 7. Connect your devices
 
@@ -194,28 +219,97 @@ docker compose logs git-ui | grep -E 'initializing|skip'
 ```
 
 `initializing My Vault -> main` means the vault is now a git repo whose `origin`
-is your server, with the token embedded in the remote URL. Open
+is your server. Credentials are supplied by a helper when git talks to the
+remote, not embedded in `.git/config`. Open
 `https://ignis-git.192.168.1.12.sslip.io/`, choose the vault, and commit and push
 in lazygit. `skip … not configured` means the remote is still a placeholder.
 
-## 8. Check it yourself
+## 8. Connect an AI agent over MCP
+
+External agents reach the same vaults over MCP. The endpoint is:
+
+```
+https://ignis-mcp.192.168.1.12.sslip.io/mcp
+Authorization: Bearer <MCP_AUTH_TOKEN>
+```
+
+A generic client configuration looks like this:
+
+```json
+{
+  "mcpServers": {
+    "vaults": {
+      "type": "http",
+      "url": "https://ignis-mcp.192.168.1.12.sslip.io/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+The server exposes six tools:
+
+| Tool | What it does |
+| --- | --- |
+| `list_vaults` | lists configured vaults, branch, and whether a remote is configured |
+| `git_status` | branch, upstream, ahead/behind, and changed paths |
+| `git_diff` | working-tree or staged diff, optionally for one path |
+| `git_log` | recent commits |
+| `git_commit` | commits only the named files with the agent author identity |
+| `git_push` | pushes the configured branch; never force-pushes |
+
+The intended workflow is: write a note over Ignis or WebDAV, inspect it with
+`git_status`/`git_diff`, commit it with `git_commit`, then `git_push`. For example,
+an agent that created `agent-note.md` calls:
+
+```json
+{"vault": "My Vault", "message": "add agent note", "paths": ["agent-note.md"]}
+```
+
+`git_commit` stages and commits exactly those paths. Anything you have staged in
+lazygit stays staged and out of the agent's commit. Commits are authored as
+`MCP_GIT_AUTHOR_NAME <MCP_GIT_AUTHOR_EMAIL>` (default
+`hermes <hermes@homelab.local>`), and `git_push` targets the branch configured in
+`repos.conf`. If the remote moved in the meantime, the push fails with
+`push_rejected`; pull in lazygit, then retry.
+
+**Security.** The endpoint is token-gated and has no shell. It can only reach
+vaults listed in `repos.conf`, cannot reset, checkout, or force-push, and its git
+commands ignore hooks and external diff drivers. Anyone with `MCP_AUTH_TOKEN` can
+still read diffs, commit, and push those vaults, so treat it as a secret.
+
+To rotate, replace `MCP_AUTH_TOKEN` in `.env` and recreate the service:
+
+```bash
+docker compose up -d --force-recreate git-mcp
+```
+
+`MCP_GIT_TOKEN` rotates separately at your git host; update `.env` and recreate
+`git-mcp`. It can be empty while you work without a remote, in which case push
+returns `no_credentials`.
+
+## 9. Check it yourself
 
 ```bash
 ./scripts/verify.sh
 ```
 
-17 checks, one `PASS`/`FAIL` line each, non-zero exit if anything fails. It reads
-`.env` the same way Compose does and changes nothing. It covers: all four
+24 checks, one `PASS`/`FAIL` line each, non-zero exit if anything fails. It reads
+`.env` the same way Compose does and changes nothing. It covers: all five
 containers healthy; the Traefik dashboard reachable only on `127.0.0.1`; both
-browser apps answering directly; plain HTTP redirecting to HTTPS; the isolation
-headers; WebDAV rejecting missing and wrong credentials and listing your vault;
-and a WebDAV write landing in the directory Ignis serves.
+browser apps answering directly; plain HTTP redirecting to HTTPS; MCP health,
+token rejection, and an authenticated initialize; the isolation headers; WebDAV
+rejecting missing and wrong credentials and listing your vault; `.git` being
+unreadable and unwritable over WebDAV; no credentials left in vault remotes; and
+a WebDAV write landing in the directory Ignis serves.
 
 One thing it cannot check is what the browser does with the certificate: **graph
 view rendering is the proof that the secure context is real.** If graph view is
 missing, the client does not trust mkcert's CA — install `rootCA.pem` there.
 
-## 9. Everyday commands
+## 10. Everyday commands
 
 ```bash
 docker compose up -d      # start
@@ -226,9 +320,9 @@ docker compose down       # stop; your notes and config stay
 ```
 
 "Healthy" is each container's own self-test: Traefik's ping endpoint, WebDAV's
-port, Ignis's HTTP root, and ttyd answering.
+port, Ignis's HTTP root, ttyd answering, and the MCP `/health` endpoint.
 
-## 10. When it goes wrong
+## 11. When it goes wrong
 
 - **`Bind for 0.0.0.0:443 failed: port is already allocated`** — something else
   holds the port. After freeing it, run `docker compose down && docker compose up -d`.
@@ -238,15 +332,32 @@ port, Ignis's HTTP root, and ttyd answering.
 - **`git-ui` restarts in a loop: `could not lock config file .git/config`** — a
   vault's `.git` is owned by another user, usually because git ran as root. Fix:
   `sudo chown -R 1000:1000 data/vaults`.
-- **A vault is in the menu but has no remote** — if a vault already has a repo,
-  `run.sh` rewrites `origin` silently at startup, so no `skip` message appears.
-  Check with `git -C "data/vaults/My Vault" remote -v`.
+- **A vault is in the menu but has no remote** — when `GIT_REMOTE_BASE_URL` is
+  configured, `run.sh` rewrites `origin` silently at startup, so no `skip` message
+  appears; with the placeholder it leaves an existing origin alone. Check with
+  `git -C "data/vaults/My Vault" remote -v`.
 - **The git UI opens straight into a shell with no login** — that is expected here;
-  keep the stack on a trusted network, or put an auth layer in front of it.
+  keep the stack on a trusted network, or put an auth layer in front of it. The
+  MCP endpoint is token-gated, but it has no user accounts.
+- **MCP returns `401 Unauthorized`** — the client is missing
+  `Authorization: Bearer <MCP_AUTH_TOKEN>` or the token does not match `.env`.
+  After changing the token, recreate `git-mcp`.
+- **MCP returns `421 Misdirected Request` or a TLS error** — the certificate does
+  not include `ignis-mcp.<HOST_IP>.sslip.io`, or the client does not trust the
+  mkcert CA. Reissue the certificate (step 4) and install `rootCA.pem` on the
+  client.
+- **MCP returns `no_remote` or `no_credentials`** — the vault's remote is still
+  the `CHANGE_ME` placeholder, or `MCP_GIT_TOKEN` is empty. Configure the remote in
+  `.env` and `repos.conf`, then recreate `git-mcp`.
+- **MCP returns `branch_mismatch`** — the vault is checked out on a branch other
+  than the one in `repos.conf`. Switch it back in lazygit; MCP does not switch
+  branches.
+- **MCP returns `push_rejected`** — the remote has commits you do not have. Pull in
+  lazygit, then retry the push.
 - **Graph view is empty, Sync is missing** — the browser does not trust the
   certificate. Run `mkcert -install` on that machine, or import its CA.
 
-## 11. The files
+## 12. The files
 
 | File | What it is |
 | --- | --- |
@@ -256,9 +367,15 @@ port, Ignis's HTTP root, and ttyd answering.
 | `config/git-ui/run.sh` | prepares the git UI: installs lazygit/ttyd, wires remotes |
 | `config/git-ui/menu.sh` | the vault menu the terminal shows |
 | `config/git-ui/repos.conf` | vault → git repo mapping (gitignored) |
+| `git-mcp/` | MCP server: vault-scoped git tools, bearer auth, tests |
 | `data/vaults/` | your vaults — the only thing here worth backing up |
-| `scripts/verify.sh` | the optional 17-check health check |
+| `scripts/verify.sh` | the optional 24-check health check |
 
 `docker compose config` prints the whole stack as Compose resolves it — every
 routing rule, every mounted path — which is the fastest way to see what is
 actually running rather than what you think is running.
+
+**Removing the MCP layer.** Stop and remove the `git-mcp` service and its
+`MCP_*` variables. The clean `origin` URLs and the credential helper are
+backward compatible with lazygit, and the WebDAV `.git` exclusion can be removed
+independently.

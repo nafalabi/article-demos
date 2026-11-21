@@ -44,33 +44,41 @@ git config --global init.defaultBranch main
 git config --global credential.helper '!f() { printf "username=%s\npassword=%s\n" "$GIT_USER" "$GIT_TOKEN"; }; f'
 clean_url() { printf '%s' "$1" | sed -E 's#^(https?://)[^/@:]+:[^/@]*@#\1#'; }
 
-# Older versions embedded credentials in each origin URL. Strip them before
-# anything else, including for vaults that are no longer in repos.conf.
-for config in /vaults/*/.git/config; do
-  [ -f "$config" ] || continue
-  dir=$(dirname "$(dirname "$config")")
-  if current=$(git -C "$dir" remote get-url origin 2>/dev/null); then
-    cleaned=$(clean_url "$current")
-    if [ "$cleaned" != "$current" ]; then
-      git -C "$dir" remote set-url origin "$cleaned"
-    fi
-  fi
+# Older versions embedded credentials in remote URLs. Scrub every URL,
+# pushurl, and insteadOf value before anything else, including vaults that are
+# no longer in repos.conf.
+find /vaults -path '*/.git/config' -type f 2>/dev/null | while IFS= read -r config; do
+  keys=$(git config --file "$config" --name-only --get-regexp \
+    '^(remote\..*\.(url|pushurl)|url\..*\.(insteadOf|pushInsteadOf))$' 2>/dev/null) || continue
+  for key in $keys; do
+    value=$(git config --file "$config" --get "$key")
+    cleaned=$(clean_url "$value")
+    [ "$cleaned" = "$value" ] || git config --file "$config" "$key" "$cleaned"
+  done
 done
 
 while IFS='|' read -r name path branch; do
+  name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  path=$(printf '%s' "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  branch=$(printf '%s' "$branch" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   case "$name" in ''|\#*) continue ;; esac
   dir="/vaults/$name"
-  remote="${GIT_REMOTE_BASE_URL%/}/$path"
+  remote=$(clean_url "${GIT_REMOTE_BASE_URL%/}/$path")
   case "$remote" in
     *CHANGE_ME*) remote_configured=false ;;
     *) remote_configured=true ;;
   esac
   if [ ! -d "$dir" ]; then echo "skip missing vault dir: $dir"; continue; fi
+  if [ -L "$dir/.git" ] || { [ -e "$dir/.git" ] && [ ! -d "$dir/.git" ]; }; then
+    echo "refusing $name: .git is not a directory" >&2
+    continue
+  fi
   if [ ! -d "$dir/.git" ]; then
     if [ "$remote_configured" = false ]; then echo "skip $name: remote not configured"; continue; fi
     echo "initializing $name -> $branch"
     git -C "$dir" init -b "$branch"
-    git -C "$dir" remote add origin "$remote"
+    git -C "$dir" remote add origin "$remote" 2>/dev/null \
+      || git -C "$dir" remote set-url origin "$remote"
   else
     if current=$(git -C "$dir" remote get-url origin 2>/dev/null); then
       if [ "$remote_configured" = true ]; then
@@ -82,7 +90,8 @@ while IFS='|' read -r name path branch; do
         fi
       fi
     elif [ "$remote_configured" = true ]; then
-      git -C "$dir" remote add origin "$remote"
+      git -C "$dir" remote add origin "$remote" 2>/dev/null \
+        || git -C "$dir" remote set-url origin "$remote"
     else
       echo "skip $name: remote not configured"
     fi

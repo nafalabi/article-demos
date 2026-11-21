@@ -81,8 +81,8 @@ $EDITOR .env
 | `TZ` | your timezone |
 | `WEBDAV_USER`, `WEBDAV_PASS` | credentials for WebDAV clients (phone/desktop) |
 | `GIT_REMOTE_BASE_URL`, `GIT_USER`, `GIT_TOKEN` | your git server for the git UI (step 7; can stay unset at first) |
-| `MCP_AUTH_TOKEN` | bearer token clients present to the MCP endpoint; required, 32+ random hex chars |
-| `MCP_GIT_TOKEN` | the MCP server's own push token; separate from `GIT_TOKEN` so it can be revoked independently |
+| `MCP_AUTH_TOKEN` | bearer token clients present to the MCP endpoint; required, 32+ random characters |
+| `MCP_GIT_TOKEN` | the MCP server's own push token; separate from `GIT_TOKEN` so it can be revoked independently (empty is allowed until a remote is used) |
 | `MCP_GIT_AUTHOR_NAME`, `MCP_GIT_AUTHOR_EMAIL` | author identity attached to agent commits (defaults: `hermes`, `hermes@homelab.local`) |
 
 Generate each token with:
@@ -139,7 +139,7 @@ editing is needed. Replace `192.168.1.12` with your `HOST_IP`.
 ## 5. Start it
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 docker compose ps
 ```
 
@@ -177,9 +177,10 @@ ls "data/vaults/My Vault/"
 ```
 
 That file is the demo's whole claim: it now exists once, and four different
-clients can read and write it. The vault's `.git` directory is intentionally
-hidden from WebDAV, so clients see notes and attachments, not repository
-internals or credentials.
+clients can read and write it. WebDAV is not allowed to touch a vault's `.git`
+directory: Traefik rejects any request whose path contains a `.git` component,
+and rclone filters the directory as a second layer. Clients see notes and
+attachments, not repository internals or credentials.
 
 ## 7. Connect your devices
 
@@ -261,15 +262,17 @@ The server exposes six tools:
 | `git_push` | pushes the configured branch; never force-pushes |
 
 The intended workflow is: write a note over Ignis or WebDAV, inspect it with
-`git_status`/`git_diff`, commit it with `git_commit`, then `git_push`. For example,
-an agent that created `agent-note.md` calls:
+`git_status`/`git_diff`, commit it with `git_commit`, then `git_push`. `git_status`
+does not fetch; ahead/behind counts reflect the last fetch or successful push. For
+example, an agent that created `agent-note.md` calls:
 
 ```json
 {"vault": "My Vault", "message": "add agent note", "paths": ["agent-note.md"]}
 ```
 
-`git_commit` stages and commits exactly those paths. Anything you have staged in
-lazygit stays staged and out of the agent's commit. Commits are authored as
+`git_commit` commits exactly those literal file paths. Globs, pathspec magic,
+directories, and symlinks are rejected, and anything you have staged in lazygit
+stays staged and out of the agent's commit. Commits are authored as
 `MCP_GIT_AUTHOR_NAME <MCP_GIT_AUTHOR_EMAIL>` (default
 `hermes <hermes@homelab.local>`), and `git_push` targets the branch configured in
 `repos.conf`. If the remote moved in the meantime, the push fails with
@@ -277,8 +280,10 @@ lazygit stays staged and out of the agent's commit. Commits are authored as
 
 **Security.** The endpoint is token-gated and has no shell. It can only reach
 vaults listed in `repos.conf`, cannot reset, checkout, or force-push, and its git
-commands ignore hooks and external diff drivers. Anyone with `MCP_AUTH_TOKEN` can
-still read diffs, commit, and push those vaults, so treat it as a secret.
+commands ignore hooks, fsmonitor, textconv, and gpg signing. A `.git` file or
+symlink inside a vault is refused rather than followed. Anyone with
+`MCP_AUTH_TOKEN` can still read diffs, commit, and push those vaults, so treat it
+as a secret.
 
 To rotate, replace `MCP_AUTH_TOKEN` in `.env` and recreate the service:
 
@@ -354,6 +359,8 @@ port, Ignis's HTTP root, ttyd answering, and the MCP `/health` endpoint.
   branches.
 - **MCP returns `push_rejected`** — the remote has commits you do not have. Pull in
   lazygit, then retry the push.
+- **Changes to `git-mcp/` do not appear** — `docker compose up -d` can reuse the
+  old image. Run `docker compose up -d --build` after editing the server.
 - **Graph view is empty, Sync is missing** — the browser does not trust the
   certificate. Run `mkcert -install` on that machine, or import its CA.
 

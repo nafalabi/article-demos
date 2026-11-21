@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 import re
@@ -31,12 +32,23 @@ _GIT_CONFIG = [
     "-c",
     "core.pager=cat",
     "-c",
+    "core.quotePath=false",
+    "-c",
+    "commit.gpgSign=false",
+    "-c",
+    "push.followTags=false",
+    "-c",
+    "push.gpgSign=false",
+    "-c",
+    "credential.helper=",
+    "-c",
     f"credential.helper={CREDENTIAL_HELPER}",
 ]
 
-_URL = re.compile(r"https?://\S+")
+_URL = re.compile(r"(?:https?|ssh)://\S+|\b[\w.-]+@[\w.-]+:\S+")
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
+logger = logging.getLogger("git-mcp.vaults")
 
 
 class GitOperationError(Exception):
@@ -81,8 +93,10 @@ def run_git(
     cwd: Path,
     args: list[str],
     timeout: int = 30,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    env.pop("MCP_AUTH_TOKEN", None)
     env.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
@@ -97,11 +111,12 @@ def run_git(
     )
     try:
         result = subprocess.run(
-            ["git", *_GIT_CONFIG, *args],
+            ["git", *_GIT_CONFIG, "--literal-pathspecs", *args],
             cwd=cwd,
             env=env,
             text=True,
             capture_output=True,
+            input=input_text,
             timeout=timeout,
             check=False,
         )
@@ -109,8 +124,10 @@ def run_git(
         raise GitOperationError("timeout", f"git {' '.join(args)} timed out") from exc
 
     if result.returncode != 0:
-        detail = _sanitize(result.stderr or result.stdout or "git failed")
-        raise GitOperationError(_classify(result.stderr or result.stdout), detail)
+        detail_text = "\n".join(
+            part for part in (result.stderr, result.stdout) if part
+        ) or "git failed"
+        raise GitOperationError(_classify(detail_text), _sanitize(detail_text))
     return result
 
 
@@ -146,13 +163,32 @@ def vault_path(settings: Settings, cfg: VaultConfig) -> Path:
 
 
 def _is_tracked(directory: Path, rel: str) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(directory), "ls-files", "--error-unmatch", "--", rel],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "-c",
+                "core.fsmonitor=false",
+                "--literal-pathspecs",
+                "-C",
+                str(directory),
+                "ls-files",
+                "-z",
+                "--",
+                rel,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if result.returncode != 0:
+        return False
+    return rel in result.stdout.split("\0")
 
 
 def validate_commit_path(directory: Path, rel: str) -> Path:
@@ -189,17 +225,71 @@ def validate_diff_path(directory: Path, rel: str) -> str:
     return rel
 
 
+def _config_entries(config_path: Path, pattern: str) -> list[tuple[str, str]]:
+    result = subprocess.run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(config_path),
+            "--get-regexp",
+            pattern,
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    entries = []
+    for line in result.stdout.splitlines():
+        key, sep, value = line.partition(" ")
+        if sep:
+            entries.append((key, value))
+    return entries
+
+
+def _scrub_config_file(config_path: Path) -> None:
+    pattern = r"^(remote\..*\.(url|pushurl)|url\..*\.(insteadOf|pushInsteadOf))$"
+    for key, value in _config_entries(config_path, pattern):
+        cleaned = clean_origin_url(value)
+        if cleaned == value:
+            continue
+        result = subprocess.run(
+            ["git", "config", "--file", str(config_path), key, cleaned],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning("failed to scrub %s in %s", key, config_path)
+
+
 def scrub_all_origins(settings: Settings) -> None:
     if not settings.vaults_root.is_dir():
         return
-    for config in sorted(settings.vaults_root.glob("*/.git/config")):
-        directory = config.parent.parent
-        origin = _origin(settings, directory)
-        if origin is None:
+    for config in sorted(settings.vaults_root.rglob(".git/config")):
+        if config.is_symlink() or not config.is_file():
             continue
-        cleaned = clean_origin_url(origin)
-        if cleaned != origin:
-            _try_git(settings, directory, ["remote", "set-url", "origin", cleaned])
+        try:
+            _scrub_config_file(config)
+        except Exception:
+            logger.warning("failed to scrub %s", config)
+
+
+def _set_origin(settings: Settings, directory: Path, remote: str) -> None:
+    origin = _origin(settings, directory)
+    if origin is None:
+        try:
+            run_git(settings, directory, ["remote", "add", "origin", remote])
+        except GitOperationError:
+            if _origin(settings, directory) is None:
+                raise
+            run_git(settings, directory, ["remote", "set-url", "origin", remote])
+    elif origin != remote:
+        run_git(settings, directory, ["remote", "set-url", "origin", remote])
 
 
 def prepare_vault(settings: Settings, cfg: VaultConfig) -> None:
@@ -207,32 +297,35 @@ def prepare_vault(settings: Settings, cfg: VaultConfig) -> None:
     if not directory.is_dir():
         return
 
+    dotgit = directory / ".git"
+    if dotgit.is_symlink() or (dotgit.exists() and not dotgit.is_dir()):
+        raise GitOperationError(
+            "not_initialized", f"vault {cfg.name!r} has a non-directory .git"
+        )
+
     remote = build_remote_url(settings.remote_base, cfg.remote_path)
     configured = remote_is_configured(remote)
 
-    if not (directory / ".git").is_dir():
+    if not dotgit.is_dir():
         run_git(settings, directory, ["init", "-b", cfg.branch])
         if configured:
-            run_git(settings, directory, ["remote", "add", "origin", remote])
+            _set_origin(settings, directory, remote)
         return
 
-    origin = _origin(settings, directory)
+    config = dotgit / "config"
+    if config.is_file():
+        _scrub_config_file(config)
+
     if configured:
-        if origin is None:
-            run_git(settings, directory, ["remote", "add", "origin", remote])
-        elif origin != remote:
-            run_git(settings, directory, ["remote", "set-url", "origin", remote])
-    elif origin is not None:
-        cleaned = clean_origin_url(origin)
-        if cleaned != origin:
-            run_git(settings, directory, ["remote", "set-url", "origin", cleaned])
+        _set_origin(settings, directory, remote)
 
 
 def list_vaults(settings: Settings) -> list[dict]:
     vaults = []
     for cfg in parse_repos_conf(settings.repos_conf):
         directory = settings.vaults_root / cfg.name
-        initialized = (directory / ".git").is_dir()
+        dotgit = directory / ".git"
+        initialized = dotgit.is_dir() and not dotgit.is_symlink()
         origin = _origin(settings, directory) if initialized else None
         vaults.append(
             {
@@ -246,11 +339,20 @@ def list_vaults(settings: Settings) -> list[dict]:
     return vaults
 
 
+def _require_repo(directory: Path, name: str) -> None:
+    if not directory.is_dir():
+        raise GitOperationError("not_initialized", f"vault {name!r} has no directory")
+    dotgit = directory / ".git"
+    if dotgit.is_symlink() or not dotgit.is_dir():
+        raise GitOperationError("not_initialized", f"vault {name!r} is not a repo")
+
+
 def status(settings: Settings, name: str) -> dict:
     cfg = resolve_vault(settings, name)
     directory = vault_path(settings, cfg)
     with _lock_for(directory):
         prepare_vault(settings, cfg)
+        _require_repo(directory, name)
         result = run_git(
             settings, directory, ["status", "--porcelain=v2", "--branch"]
         )
@@ -269,6 +371,8 @@ def status(settings: Settings, name: str) -> dict:
             match = re.fullmatch(r"# branch\.ab \+(\d+) -(\d+)", line)
             if match:
                 ahead, behind = int(match.group(1)), int(match.group(2))
+        elif line.startswith("#"):
+            continue
         elif line:
             changes.append(line)
 
@@ -289,7 +393,8 @@ def diff(
     directory = vault_path(settings, cfg)
     with _lock_for(directory):
         prepare_vault(settings, cfg)
-        args = ["diff", "--no-ext-diff", "--no-color"]
+        _require_repo(directory, name)
+        args = ["diff", "--no-ext-diff", "--no-textconv", "--no-color"]
         if staged:
             args.append("--cached")
         if path:
@@ -310,6 +415,9 @@ def log(settings: Settings, name: str, limit: int) -> dict:
     limit = max(1, min(50, int(limit)))
     with _lock_for(directory):
         prepare_vault(settings, cfg)
+        _require_repo(directory, name)
+        if _try_git(settings, directory, ["rev-parse", "--verify", "HEAD"]) is None:
+            return {"commits": []}
         result = run_git(
             settings,
             directory,
@@ -341,9 +449,9 @@ def commit(
     settings: Settings, name: str, message: str, paths: list[str]
 ) -> dict:
     if not message or not message.strip():
-        raise GitOperationError("no_changes", "commit message is required")
+        raise GitOperationError("invalid_message", "commit message is required")
     if len(message) > 2000:
-        raise GitOperationError("invalid_path", "commit message is too long")
+        raise GitOperationError("invalid_message", "commit message is too long")
     if not paths:
         raise GitOperationError("invalid_path", "at least one path is required")
     if len(paths) > 100:
@@ -354,8 +462,8 @@ def commit(
 
     with _lock_for(directory):
         prepare_vault(settings, cfg)
-        if not (directory / ".git").is_dir():
-            raise GitOperationError("not_initialized", f"vault {name!r} is not a repo")
+        _require_repo(directory, name)
+        _unset_dangerous_config(settings, directory)
 
         validated = [(rel, validate_commit_path(directory, rel)) for rel in paths]
         intent_added: list[str] = []
@@ -368,7 +476,16 @@ def commit(
             run_git(
                 settings,
                 directory,
-                ["commit", "--only", "-m", message, "--", *[rel for rel, _ in validated]],
+                [
+                    "commit",
+                    "--only",
+                    "--no-verify",
+                    "--no-gpg-sign",
+                    "-m",
+                    message,
+                    "--",
+                    *[rel for rel, _ in validated],
+                ],
             )
         except GitOperationError:
             for rel in intent_added:
@@ -380,12 +497,38 @@ def commit(
             raise
 
         head = run_git(settings, directory, ["rev-parse", "HEAD"]).stdout.strip()
+        files = run_git(
+            settings,
+            directory,
+            ["show", "--pretty=format:", "--name-only", head],
+        ).stdout.splitlines()
+        files = [rel for rel in files if rel]
 
     return {
         "commit": head,
-        "files": [rel for rel, _ in validated],
+        "files": files,
         "author": f"{settings.author_name} <{settings.author_email}>",
     }
+
+
+def _unset_dangerous_config(settings: Settings, directory: Path) -> None:
+    for key in (
+        "remote.origin.push",
+        "remote.origin.pushurl",
+        "remote.origin.mirror",
+        "core.sshCommand",
+        "gpg.program",
+    ):
+        _try_git(settings, directory, ["config", "--local", "--unset-all", key])
+
+    config = directory / ".git" / "config"
+    for pattern in (
+        r"^url\..*\.(insteadOf|pushInsteadOf)$",
+        r"^filter\..*\.(clean|smudge|process|required)$",
+        r"^diff\..*\.(textconv|command)$",
+    ):
+        for key, _ in _config_entries(config, pattern):
+            _try_git(settings, directory, ["config", "--local", "--unset-all", key])
 
 
 def push(settings: Settings, name: str) -> dict:
@@ -394,8 +537,8 @@ def push(settings: Settings, name: str) -> dict:
 
     with _lock_for(directory):
         prepare_vault(settings, cfg)
-        if not (directory / ".git").is_dir():
-            raise GitOperationError("not_initialized", f"vault {name!r} is not a repo")
+        _require_repo(directory, name)
+        _unset_dangerous_config(settings, directory)
 
         current = run_git(
             settings, directory, ["rev-parse", "--abbrev-ref", "HEAD"]
@@ -414,15 +557,25 @@ def push(settings: Settings, name: str) -> dict:
             raise GitOperationError(
                 "no_remote", f"vault {name!r} remote is not configured"
             )
-        if origin.startswith(("http://", "https://")) and not settings.git_token:
+        if origin.startswith(("http://", "https://")) and (
+            not settings.git_token or not settings.git_user
+        ):
             raise GitOperationError(
-                "no_credentials", "MCP_GIT_TOKEN is empty"
+                "no_credentials", "GIT_USER or MCP_GIT_TOKEN is empty"
             )
 
         result = run_git(
             settings,
             directory,
-            ["push", "--porcelain", "--no-verify", "origin", cfg.branch],
+            [
+                "push",
+                "--porcelain",
+                "--no-verify",
+                "--no-follow-tags",
+                "--no-signed",
+                "origin",
+                cfg.branch,
+            ],
             timeout=60,
         )
 

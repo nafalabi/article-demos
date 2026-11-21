@@ -117,6 +117,16 @@ services:
       - traefik.http.routers.webdav.tls=true
       - traefik.http.routers.webdav.middlewares=webdav-headers@docker
       - traefik.http.services.webdav.loadbalancer.server.port=8081
+      # rclone --exclude hides .git from listings, but it does not deny write
+      # methods. A higher-priority Traefik router rejects every request whose
+      # path contains a .git component, before it reaches rclone.
+      - traefik.http.routers.webdav-git-deny.entrypoints=websecure
+      - traefik.http.routers.webdav-git-deny.rule=Host(`ignis-webdav.${HOST_IP:?set HOST_IP in .env}.sslip.io`) && PathRegexp(`(?i)(^|/)\.git(/|$)`)
+      - traefik.http.routers.webdav-git-deny.priority=1000
+      - traefik.http.routers.webdav-git-deny.service=webdav
+      - traefik.http.routers.webdav-git-deny.tls=true
+      - traefik.http.routers.webdav-git-deny.middlewares=webdav-git-deny@docker
+      - traefik.http.middlewares.webdav-git-deny.ipallowlist.sourcerange=192.0.2.0/24
       - traefik.http.middlewares.webdav-headers.headers.customresponseheaders.Cross-Origin-Opener-Policy=same-origin
       - traefik.http.middlewares.webdav-headers.headers.customresponseheaders.Cross-Origin-Embedder-Policy=credentialless
     healthcheck:

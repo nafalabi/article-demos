@@ -18,6 +18,10 @@ set -a
 set +a
 
 : "${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}"
+if [ "${#MCP_AUTH_TOKEN}" -lt 32 ] || [ "${MCP_AUTH_TOKEN#CHANGE_ME}" != "$MCP_AUTH_TOKEN" ]; then
+  echo "FAIL: MCP_AUTH_TOKEN must be 32+ random characters (openssl rand -hex 32)"
+  exit 1
+fi
 
 zone="$HOST_IP.sslip.io"
 IGNIS_HOST="ignis.$zone"
@@ -63,9 +67,10 @@ check "plain http redirects" "302" "$(curl -s -o /dev/null -w '%{http_code}' "ht
 echo "== mcp"
 mcp_init_body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}'
 check "mcp health" "200" "$(code "https://$MCP_HOST/health")"
-check "mcp rejects missing token" "401" "$(code -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$mcp_init_body" "https://$MCP_HOST/mcp")"
+check "mcp rejects missing and wrong tokens" "401 401" \
+  "$(code -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$mcp_init_body" "https://$MCP_HOST/mcp") $(code -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'Authorization: Bearer wrong-token' -d "$mcp_init_body" "https://$MCP_HOST/mcp")"
 init_code="$(curl -s -o /tmp/verify-mcp-init -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $MCP_AUTH" -d "$mcp_init_body" --cacert "$CA" "https://$MCP_HOST/mcp")"
-if [ "$init_code" = "200" ] && grep -q '"protocolVersion"' /tmp/verify-mcp-init; then
+if [ "$init_code" = "200" ] && grep -q '"protocolVersion"' /tmp/verify-mcp-init && grep -q '"name":"git-mcp"' /tmp/verify-mcp-init; then
   check "mcp answers an authenticated initialize" "yes" "yes"
 else
   check "mcp answers an authenticated initialize" "yes" "no"
@@ -93,20 +98,21 @@ echo "== dotgit is not exposed"
 vault_name="$(awk -F'|' '!/^[[:space:]]*(#|$)/ {print $1; exit}' config/git-ui/repos.conf 2>/dev/null)"
 vault_name="${vault_name:-My Vault}"
 vault_url="${vault_name// /%20}"
-dotgit_code="$(code -u "$WEBDAV_AUTH" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/config")"
-case "$dotgit_code" in
-  200) check "webdav hides .git/config" "denied" "200" ;;
-  *)   check "webdav hides .git/config" "denied" "denied" ;;
-esac
-printf 'x\n' >/tmp/verify-dotgit-write
-dotgit_put="$(curl -s -o /dev/null -w '%{http_code}' -T /tmp/verify-dotgit-write -u "$WEBDAV_AUTH" --cacert "$CA" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/verify-should-not-exist")"
-case "$dotgit_put" in
-  2*) check "webdav rejects .git writes" "denied" "$dotgit_put" ;;
-  *)  check "webdav rejects .git writes" "denied" "denied" ;;
-esac
+guard_dir="verify-guard"
+mkdir -p "data/vaults/$guard_dir"
+dotgit_read="$(code -u "$WEBDAV_AUTH" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/config")"
+check "webdav denies .git reads" "403" "$dotgit_read"
+dotgit_writes="$(
+  printf 'x\n' >/tmp/verify-dotgit-write
+  curl -s -o /dev/null -w '%{http_code} ' -T /tmp/verify-dotgit-write -u "$WEBDAV_AUTH" --cacert "$CA" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/verify-should-not-exist"
+  curl -s -o /dev/null -w '%{http_code} ' -T /tmp/verify-dotgit-write -u "$WEBDAV_AUTH" --cacert "$CA" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/hooks/pre-commit"
+  curl -s -o /dev/null -w '%{http_code}' -X MKCOL -u "$WEBDAV_AUTH" --cacert "$CA" "https://$IGNIS_WEBDAV_HOST/$guard_dir/.git"
+)"
+check "webdav denies .git writes" "403 403 403" "$dotgit_writes"
 rm -f /tmp/verify-dotgit-write "data/vaults/$vault_name/.git/verify-should-not-exist"
+rm -rf "data/vaults/$guard_dir"
 
-leaked="$(grep -El 'url = https?://[^/@]+:[^/@]*@' data/vaults/*/.git/config 2>/dev/null || true)"
+leaked="$(grep -REl '^[[:space:]]*(url|pushurl) = https?://[^/@]+:[^/@]*@' data/vaults 2>/dev/null || true)"
 check "no credentials in vault remotes" "" "$leaked"
 
 echo "== one directory, four consumers"

@@ -59,6 +59,14 @@ async def test_bearer_middleware_blocks_mcp_without_token():
     assert status is None
     assert seen == ["/mcp"]
 
+    status = await call_asgi(
+        middleware,
+        path="/mcp",
+        headers=[(b"authorization", b"Bearer wrong")],
+    )
+    assert status == 401
+    assert seen == ["/mcp"]
+
     status = await call_asgi(middleware, path="/health", headers=[])
     assert status is None
     assert seen == ["/mcp", "/health"]

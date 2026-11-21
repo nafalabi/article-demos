@@ -33,6 +33,11 @@ class Settings:
         public_host = os.environ.get("MCP_PUBLIC_HOST", "")
         if not auth_token:
             raise RuntimeError("MCP_AUTH_TOKEN is required")
+        if len(auth_token) < 32 or "CHANGE_ME" in auth_token:
+            raise RuntimeError(
+                "MCP_AUTH_TOKEN must be at least 32 characters; generate one with "
+                "'openssl rand -hex 32'"
+            )
         if not public_host:
             raise RuntimeError("MCP_PUBLIC_HOST is required")
 
@@ -79,7 +84,8 @@ def clean_origin_url(url: str) -> str:
 
 
 def build_remote_url(remote_base: str, remote_path: str) -> str:
-    return f"{remote_base.rstrip('/')}/{remote_path.lstrip('/')}"
+    base = clean_origin_url(remote_base).rstrip("/")
+    return f"{base}/{remote_path.lstrip('/')}"
 
 
 def remote_is_configured(url: str) -> bool:

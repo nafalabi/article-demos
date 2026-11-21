@@ -52,7 +52,12 @@ def build_server(settings: Settings) -> MCPServer:
         except Exception:
             logger.exception("tool=%s vault=%s outcome=crash", name, vault or "-")
             raise
-        logger.info("tool=%s vault=%s outcome=ok", name, vault or "-")
+        extra = ""
+        if isinstance(result, dict) and result.get("commit"):
+            extra = f" commit={result['commit']}"
+        logger.info(
+            "tool=%s vault=%s outcome=ok%s", name, vault or "-", extra
+        )
         return result
 
     @mcp.tool()
@@ -62,12 +67,18 @@ def build_server(settings: Settings) -> MCPServer:
 
     @mcp.tool()
     def git_status(vault: str) -> dict[str, object]:
-        """Show branch, upstream, ahead/behind, and changed paths for a vault."""
+        """Show branch, upstream, ahead/behind, and changed paths for a vault.
+
+        Does not fetch; ahead/behind reflect the last fetch or successful push.
+        """
         return call("git_status", vault, vaults.status, vault)
 
     @mcp.tool()
     def git_diff(vault: str, staged: bool = False, path: str | None = None) -> dict[str, object]:
-        """Show a unified diff for a vault, optionally staged and limited to a path."""
+        """Show a unified diff for a vault, optionally staged and limited to one literal path.
+
+        Use an exact file or directory path; globs and pathspec magic are rejected.
+        """
         return call("git_diff", vault, vaults.diff, vault, staged, path)
 
     @mcp.tool()
@@ -77,7 +88,11 @@ def build_server(settings: Settings) -> MCPServer:
 
     @mcp.tool()
     def git_commit(vault: str, message: str, paths: list[str]) -> dict[str, object]:
-        """Commit specific files in a vault with the agent author identity."""
+        """Commit specific regular files in a vault with the agent author identity.
+
+        Paths are literal, must not contain directories or symlinks, and unrelated
+        staged changes are left untouched.
+        """
         return call("git_commit", vault, vaults.commit, vault, message, paths)
 
     @mcp.tool()

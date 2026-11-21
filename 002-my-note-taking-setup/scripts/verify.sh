@@ -17,10 +17,13 @@ set -a
 . ./.env
 set +a
 
+: "${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}"
+
 zone="$HOST_IP.sslip.io"
 IGNIS_HOST="ignis.$zone"
 IGNIS_WEBDAV_HOST="ignis-webdav.$zone"
 IGNIS_GIT_HOST="ignis-git.$zone"
+MCP_HOST="ignis-mcp.$zone"
 
 CA="$(mkcert -CAROOT 2>/dev/null)/rootCA.pem"
 if [ ! -f "$CA" ]; then
@@ -29,6 +32,7 @@ if [ ! -f "$CA" ]; then
 fi
 
 WEBDAV_AUTH="$WEBDAV_USER:$WEBDAV_PASS"
+MCP_AUTH="$MCP_AUTH_TOKEN"
 
 failures=0
 check() { # check <name> <expected> <actual>
@@ -42,7 +46,7 @@ check() { # check <name> <expected> <actual>
 code() { curl -s -o /dev/null -w '%{http_code}' --cacert "$CA" "$@"; }
 
 echo "== containers"
-for svc in traefik ignis webdav git-ui; do
+for svc in traefik ignis webdav git-ui git-mcp; do
   state="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk -v s="$svc" '$1==s{print $2}')"
   check "service $svc healthy" "healthy" "${state:-missing}"
 done
@@ -55,6 +59,18 @@ echo "== routing"
 check "ignis serves the app" "200" "$(code "https://$IGNIS_HOST/")"
 check "git ui serves the terminal" "200" "$(code "https://$IGNIS_GIT_HOST/")"
 check "plain http redirects" "302" "$(curl -s -o /dev/null -w '%{http_code}' "http://$IGNIS_HOST/")"
+
+echo "== mcp"
+mcp_init_body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}'
+check "mcp health" "200" "$(code "https://$MCP_HOST/health")"
+check "mcp rejects missing token" "401" "$(code -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$mcp_init_body" "https://$MCP_HOST/mcp")"
+init_code="$(curl -s -o /tmp/verify-mcp-init -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $MCP_AUTH" -d "$mcp_init_body" --cacert "$CA" "https://$MCP_HOST/mcp")"
+if [ "$init_code" = "200" ] && grep -q '"protocolVersion"' /tmp/verify-mcp-init; then
+  check "mcp answers an authenticated initialize" "yes" "yes"
+else
+  check "mcp answers an authenticated initialize" "yes" "no"
+fi
+rm -f /tmp/verify-mcp-init
 
 echo "== isolation headers"
 headers="$(curl -s -o /dev/null -D - --cacert "$CA" "https://$IGNIS_HOST/")"
@@ -73,7 +89,27 @@ case "$listing" in
   *) check "webdav exposes the vault Ignis created (open Ignis once so it creates 'My Vault')" "yes" "no" ;;
 esac
 
-echo "== one directory, three consumers"
+echo "== dotgit is not exposed"
+vault_name="$(awk -F'|' '!/^[[:space:]]*(#|$)/ {print $1; exit}' config/git-ui/repos.conf 2>/dev/null)"
+vault_name="${vault_name:-My Vault}"
+vault_url="${vault_name// /%20}"
+dotgit_code="$(code -u "$WEBDAV_AUTH" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/config")"
+case "$dotgit_code" in
+  200) check "webdav hides .git/config" "denied" "200" ;;
+  *)   check "webdav hides .git/config" "denied" "denied" ;;
+esac
+printf 'x\n' >/tmp/verify-dotgit-write
+dotgit_put="$(curl -s -o /dev/null -w '%{http_code}' -T /tmp/verify-dotgit-write -u "$WEBDAV_AUTH" --cacert "$CA" "https://$IGNIS_WEBDAV_HOST/$vault_url/.git/verify-should-not-exist")"
+case "$dotgit_put" in
+  2*) check "webdav rejects .git writes" "denied" "$dotgit_put" ;;
+  *)  check "webdav rejects .git writes" "denied" "denied" ;;
+esac
+rm -f /tmp/verify-dotgit-write "data/vaults/$vault_name/.git/verify-should-not-exist"
+
+leaked="$(grep -El 'url = https?://[^/@]+:[^/@]*@' data/vaults/*/.git/config 2>/dev/null || true)"
+check "no credentials in vault remotes" "" "$leaked"
+
+echo "== one directory, four consumers"
 printf '# verify\n' > /tmp/verify-note.md
 put="$(curl -s -o /dev/null -w '%{http_code}' -T /tmp/verify-note.md -u "$WEBDAV_AUTH" --cacert "$CA" "https://$IGNIS_WEBDAV_HOST/My%20Vault/verify-note.md")"
 case "$put" in

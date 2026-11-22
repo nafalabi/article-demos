@@ -138,6 +138,18 @@ editing is needed. Replace `192.168.1.12` with your `HOST_IP`.
 
 ## 5. Start it
 
+The git UI reads `config/git-ui/repos.conf` at startup. It is gitignored, so
+create it from the sample first; otherwise `git-ui` restarts and never becomes
+healthy:
+
+```bash
+cp config/git-ui/repos.conf.sample config/git-ui/repos.conf
+```
+
+The sample already lists `My Vault`. With the placeholder remote in `.env`, the
+git UI starts and logs `skip My Vault: remote not configured`; configure the
+remote in step 7.
+
 ```bash
 docker compose up -d --build
 docker compose ps
@@ -205,8 +217,8 @@ GIT_USER=your-username
 GIT_TOKEN=a-token-with-repo-scope
 ```
 
-Then list the vaults in `config/git-ui/repos.conf` (one per line,
-`name|path-on-the-server|branch`):
+Then edit the `config/git-ui/repos.conf` you created in step 5 (one line per
+vault, `name|path-on-the-server|branch`):
 
 ```
 My Vault|owner/notes.git|main
@@ -215,7 +227,7 @@ My Vault|owner/notes.git|main
 and pick it up:
 
 ```bash
-docker compose up -d --force-recreate git-ui
+docker compose up -d --force-recreate git-ui git-mcp
 docker compose logs git-ui | grep -E 'initializing|skip'
 ```
 

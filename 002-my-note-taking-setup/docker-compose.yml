@@ -210,6 +210,31 @@ services:
     networks:
       - notes
 
+  openai-tunnel:
+    image: ghcr.io/openai/tunnel-client:v0.0.21
+    container_name: notes-openai-tunnel
+    profiles: ["openai"]
+    restart: unless-stopped
+    depends_on:
+      git-mcp:
+        condition: service_healthy
+    environment:
+      CONTROL_PLANE_TUNNEL_ID: ${CONTROL_PLANE_TUNNEL_ID:-}
+      CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:-}
+      MCP_SERVER_URL: http://git-mcp:8080/mcp
+      MCP_OAUTH_DISCOVERY: disabled
+      MCP_EXTRA_HEADERS: "Authorization: Bearer ${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}"
+      HEALTH_LISTEN_ADDR: 127.0.0.1:8080
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - notes
+
 networks:
   notes:
     name: notes

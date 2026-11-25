@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import hmac
 import logging
+from typing import Any
 
 import uvicorn
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import Settings, parse_repos_conf
+import attachments
 import notes
 import vaults
 
@@ -94,6 +97,70 @@ def build_server(settings: Settings) -> MCPServer:
     def delete_note(vault: str, path: str) -> dict[str, object]:
         """Delete a regular note file from a vault."""
         return call("delete_note", vault, notes.delete_note, vault, path)
+
+    @mcp.tool()
+    def list_attachments(vault: str, prefix: str | None = None) -> dict[str, object]:
+        """List attachment files (.png, .jpg, .jpeg, .svg, .pdf) in a vault."""
+        return call("list_attachments", vault, attachments.list_attachments, vault, prefix)
+
+    @mcp.tool()
+    def read_attachment(vault: str, path: str) -> dict[str, object]:
+        """Read an attachment file from a vault as base64."""
+        return call("read_attachment", vault, attachments.read_attachment, vault, path)
+
+    @mcp.tool(
+        title="Upload attachment",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+        meta={"openai/fileParams": ["file"]},
+    )
+    def upload_attachment(
+        vault: str,
+        path: str,
+        content_base64: str | None = None,
+        file: dict[str, Any] | str | None = None,
+    ) -> dict[str, object]:
+        """Upload a new attachment (.png, .jpg, .jpeg, .svg, .pdf) via base64 or ChatGPT file reference without overwriting."""
+        return call(
+            "upload_attachment",
+            vault,
+            attachments.upload_attachment,
+            vault,
+            path,
+            content_base64,
+            file,
+        )
+
+    # Match OpenAI's official OpenAIFile $defs/$ref schema (with additionalProperties: false)
+    # required by openai/fileParams discovery while runtime accepts dict or fallback string.
+    upload_tool = mcp._tool_manager.get_tool("upload_attachment")
+    if upload_tool is not None:
+        defs = upload_tool.parameters.setdefault("$defs", {})
+        defs["OpenAIFile"] = {
+            "type": "object",
+            "properties": {
+                "download_url": {"type": "string"},
+                "file_id": {"type": "string"},
+                "mime_type": {"type": "string"},
+                "file_name": {"type": "string"},
+            },
+            "required": ["download_url", "file_id"],
+            "additionalProperties": False,
+        }
+        upload_tool.parameters.setdefault("properties", {})["file"] = {
+            "$ref": "#/$defs/OpenAIFile",
+            "title": "File",
+            "description": "ChatGPT file reference resolved via openai/fileParams.",
+        }
+
+    @mcp.tool()
+    def delete_attachment(vault: str, path: str) -> dict[str, object]:
+        """Delete an existing attachment file from a vault."""
+        return call("delete_attachment", vault, attachments.delete_attachment, vault, path)
 
     @mcp.tool()
     def git_status(vault: str) -> dict[str, object]:

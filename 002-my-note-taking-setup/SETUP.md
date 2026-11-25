@@ -263,17 +263,21 @@ A generic client configuration looks like this:
 }
 ```
 
-The server exposes eleven tools — five for reading and editing notes, and six
-for git operations:
+The server exposes fifteen tools — five for reading and editing notes/configs,
+four for binary/SVG attachments, and six for git operations:
 
 | Tool | What it does |
 | --- | --- |
 | `list_vaults` | lists configured vaults, branch, and whether a remote is configured |
 | `list_notes` | lists note files (`.md`, `.markdown`, `.txt`, `.canvas`) in a vault, optionally under a `prefix` |
-| `read_note` | reads a UTF-8 note file from a vault (up to 256 KiB by default) |
+| `read_note` | reads a UTF-8 note file (or explicit config like `.gitignore`, `.obsidian/workspace.json`) from a vault (up to 256 KiB by default) |
 | `search_notes` | case-insensitive search across note paths and UTF-8 contents |
-| `write_note` | creates or overwrites a UTF-8 note file (supports `overwrite=false` for create-only) |
-| `delete_note` | deletes a regular note file (pair with `git_commit` to record the deletion) |
+| `write_note` | creates or overwrites a UTF-8 note file or explicit config file (supports `overwrite=false` for create-only) |
+| `delete_note` | deletes a regular note file or explicit config file (pair with `git_commit` to record the deletion) |
+| `list_attachments` | lists attachment files (`.png`, `.jpg`, `.jpeg`, `.svg`, `.pdf`) in a vault |
+| `read_attachment` | reads an attachment file from a vault as base64 |
+| `upload_attachment` | uploads a new attachment via base64 or ChatGPT `openai/fileParams` streaming download without overwriting |
+| `delete_attachment` | deletes an existing attachment file (pair with `git_commit` to record the deletion) |
 | `git_status` | branch, upstream, ahead/behind, and changed paths |
 | `git_diff` | working-tree or staged diff, optionally for one path |
 | `git_log` | recent commits |
@@ -300,14 +304,19 @@ stays staged and out of the agent's commit. Commits are authored as
 `push_rejected`; pull in lazygit, then retry.
 
 **Security.** The endpoint is token-gated and has no shell. Note tools and git
-tools can only reach vaults listed in `repos.conf`, reject `..`, `.git`,
-`.obsidian`, and symlinks, restrict note reads/writes/deletes to `.md`,
-`.markdown`, `.txt`, and `.canvas` files (256 KiB UTF-8 limit by default),
-cannot reset, checkout, or force-push, and ignore git hooks, fsmonitor,
-textconv, and gpg signing. A `.git` file or symlink inside a vault is refused
-rather than followed. Anyone with `MCP_AUTH_TOKEN` (or access to an attached
-tunnel) can read/edit notes, commit, and push those vaults, so treat both
-`MCP_AUTH_TOKEN` and `CONTROL_PLANE_API_KEY` as secrets.
+tools can only reach vaults listed in `repos.conf`, reject `..`, `.git`, and
+symlinks, restrict note reads/writes/deletes to `.md`, `.markdown`, `.txt`, and
+`.canvas` files (256 KiB UTF-8 limit by default) plus explicit root/Obsidian
+config files (`.gitignore`, `.gitattributes`, and top-level `.obsidian/*.json`
+such as `.obsidian/workspace.json`), restrict attachment tools to `.png`,
+`.jpg`, `.jpeg`, `.svg`, and `.pdf` (preventing overwrites, enforcing
+OpenAI `oaiusercontent.com` / `(oai|sdmnt)*.blob.core.windows.net` HTTPS +
+global-IP SSRF checks on `file.download_url`, and streaming in 64 KiB chunks with an optional `ATTACHMENT_SIZE_LIMIT`), cannot
+reset, checkout, or force-push, and ignore git hooks, fsmonitor, textconv, and
+gpg signing. A `.git` file or symlink inside a vault is refused rather than
+followed. Anyone with `MCP_AUTH_TOKEN` (or access to an attached tunnel) can
+read/edit notes, upload/delete attachments, commit, and push those vaults, so
+treat both `MCP_AUTH_TOKEN` and `CONTROL_PLANE_API_KEY` as secrets.
 
 ### Connect ChatGPT via OpenAI Secure MCP Tunnel
 

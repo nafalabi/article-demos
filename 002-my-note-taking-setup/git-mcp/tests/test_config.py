@@ -57,3 +57,20 @@ def test_settings_from_env_parses_note_size_limit(monkeypatch):
 
     monkeypatch.setenv("NOTE_SIZE_LIMIT", "1024")
     assert Settings.from_env().note_size_limit == 1024
+
+
+def test_settings_from_env_parses_optional_attachment_size_limit(monkeypatch):
+    monkeypatch.setenv("MCP_PUBLIC_HOST", "ignis-mcp.example.test")
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "a" * 32)
+    assert Settings.from_env().attachment_size_limit is None
+
+    for disabled in ("", "0", "none", "unlimited"):
+        monkeypatch.setenv("ATTACHMENT_SIZE_LIMIT", disabled)
+        assert Settings.from_env().attachment_size_limit is None
+
+    monkeypatch.setenv("ATTACHMENT_SIZE_LIMIT", "1048576")
+    assert Settings.from_env().attachment_size_limit == 1048576
+
+    monkeypatch.setenv("ATTACHMENT_SIZE_LIMIT", "-1")
+    with pytest.raises(ValueError):
+        Settings.from_env()

@@ -15,7 +15,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY config.py vaults.py notes.py server.py ./
+COPY config.py vaults.py notes.py attachments.py server.py ./
 ENV HOME=/tmp PYTHONUNBUFFERED=1
 EXPOSE 8080
 CMD ["python", "server.py"]

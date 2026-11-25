@@ -27,6 +27,7 @@ class Settings:
     public_host: str
     diff_limit: int = 65536
     note_size_limit: int = 262144
+    attachment_size_limit: int | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -60,7 +61,22 @@ class Settings:
             public_host=public_host,
             diff_limit=int(os.environ.get("DIFF_LIMIT", "65536")),
             note_size_limit=int(os.environ.get("NOTE_SIZE_LIMIT", "262144")),
+            attachment_size_limit=_parse_optional_size_limit(
+                os.environ.get("ATTACHMENT_SIZE_LIMIT")
+            ),
         )
+
+
+def _parse_optional_size_limit(raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped or stripped.lower() in {"0", "none", "unlimited"}:
+        return None
+    value = int(stripped)
+    if value < 0:
+        raise ValueError("ATTACHMENT_SIZE_LIMIT must be non-negative")
+    return value
 
 
 def parse_repos_conf(path: Path) -> list[VaultConfig]:

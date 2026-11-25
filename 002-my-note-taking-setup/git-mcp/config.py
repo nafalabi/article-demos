@@ -26,6 +26,7 @@ class Settings:
     author_email: str
     public_host: str
     diff_limit: int = 65536
+    note_size_limit: int = 262144
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -58,6 +59,7 @@ class Settings:
             ),
             public_host=public_host,
             diff_limit=int(os.environ.get("DIFF_LIMIT", "65536")),
+            note_size_limit=int(os.environ.get("NOTE_SIZE_LIMIT", "262144")),
         )
 
 

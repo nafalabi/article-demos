@@ -48,3 +48,12 @@ def test_settings_from_env_rejects_short_or_placeholder_token(monkeypatch):
 
     monkeypatch.setenv("MCP_AUTH_TOKEN", "a" * 32)
     assert Settings.from_env().auth_token == "a" * 32
+
+
+def test_settings_from_env_parses_note_size_limit(monkeypatch):
+    monkeypatch.setenv("MCP_PUBLIC_HOST", "ignis-mcp.example.test")
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "a" * 32)
+    assert Settings.from_env().note_size_limit == 262144
+
+    monkeypatch.setenv("NOTE_SIZE_LIMIT", "1024")
+    assert Settings.from_env().note_size_limit == 1024

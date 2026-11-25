@@ -88,3 +88,61 @@ def test_search_notes_matches_paths_and_content_case_insensitively(tmp_path):
     with pytest.raises(GitOperationError) as exc:
         notes.search_notes(settings, "My Vault", "   ")
     assert exc.value.code == "invalid_query"
+
+
+import vaults
+
+
+def test_write_note_creates_overwrites_and_respects_guardrails(tmp_path):
+    settings, vault = make_settings(tmp_path)
+
+    created = notes.write_note(settings, "My Vault", "folder/new.md", "# Title\n")
+    assert created == {
+        "vault": "My Vault",
+        "path": "folder/new.md",
+        "created": True,
+        "size_bytes": 8,
+    }
+    assert (vault / "folder" / "new.md").read_text(encoding="utf-8") == "# Title\n"
+
+    with pytest.raises(GitOperationError) as exc:
+        notes.write_note(settings, "My Vault", "folder/new.md", "nope", overwrite=False)
+    assert exc.value.code == "already_exists"
+
+    updated = notes.write_note(settings, "My Vault", "folder/new.md", "updated\n", overwrite=True)
+    assert updated["created"] is False
+    assert (vault / "folder" / "new.md").read_text(encoding="utf-8") == "updated\n"
+
+    (vault / "symdir").symlink_to(tmp_path)
+    with pytest.raises(GitOperationError) as exc:
+        notes.write_note(settings, "My Vault", "symdir/escape.md", "x")
+    assert exc.value.code == "invalid_path"
+
+    small_settings = type(settings)(**{**settings.__dict__, "note_size_limit": 4})
+    with pytest.raises(GitOperationError) as exc:
+        notes.write_note(small_settings, "My Vault", "small.md", "12345")
+    assert exc.value.code == "note_too_large"
+
+
+def test_delete_note_and_commit_flow(tmp_path):
+    settings, vault = make_settings(tmp_path)
+
+    notes.write_note(settings, "My Vault", "drafts/plan.md", "v1\n")
+    c1 = vaults.commit(settings, "My Vault", "add draft", ["drafts/plan.md"])
+    assert c1["files"] == ["drafts/plan.md"]
+
+    deleted = notes.delete_note(settings, "My Vault", "drafts/plan.md")
+    assert deleted == {"vault": "My Vault", "path": "drafts/plan.md", "deleted": True}
+    assert not (vault / "drafts" / "plan.md").exists()
+
+    c2 = vaults.commit(settings, "My Vault", "remove draft", ["drafts/plan.md"])
+    assert c2["files"] == ["drafts/plan.md"]
+
+    with pytest.raises(GitOperationError) as exc:
+        notes.delete_note(settings, "My Vault", "drafts/plan.md")
+    assert exc.value.code == "not_found"
+
+    (vault / "adir.md").mkdir()
+    with pytest.raises(GitOperationError) as exc:
+        notes.delete_note(settings, "My Vault", "adir.md")
+    assert exc.value.code == "invalid_path"

@@ -184,3 +184,59 @@ def search_notes(
         "matches": matches,
         "truncated": truncated,
     }
+
+
+def write_note(
+    settings: Settings,
+    name: str,
+    path: str,
+    content: str,
+    overwrite: bool = True,
+) -> dict:
+    """Create or overwrite a UTF-8 note file in a vault within the size limit."""
+    encoded = content.encode("utf-8")
+    if len(encoded) > settings.note_size_limit:
+        raise GitOperationError(
+            "note_too_large",
+            f"note exceeds {settings.note_size_limit} byte limit",
+        )
+
+    directory = _require_vault_dir(settings, name)
+    with _lock_for(directory):
+        posix, full = _validate_note_path(directory, path)
+        if full.exists() and not full.is_file():
+            raise GitOperationError("invalid_path", f"not a regular file: {path!r}")
+        existed = full.exists()
+        if existed and not overwrite:
+            raise GitOperationError("already_exists", f"note already exists: {path!r}")
+
+        cur = directory
+        for part in full.relative_to(directory).parent.parts:
+            cur = cur / part
+            if cur.is_symlink():
+                raise GitOperationError("invalid_path", f"symlink rejected: {path!r}")
+            if cur.exists() and not cur.is_dir():
+                raise GitOperationError("invalid_path", f"parent is not a directory: {path!r}")
+
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_bytes(encoded)
+
+    return {
+        "vault": name,
+        "path": posix.as_posix(),
+        "created": not existed,
+        "size_bytes": len(encoded),
+    }
+
+
+def delete_note(settings: Settings, name: str, path: str) -> dict:
+    """Delete a regular note file from a vault."""
+    directory = _require_vault_dir(settings, name)
+    with _lock_for(directory):
+        posix, full = _validate_note_path(directory, path)
+        if not full.exists():
+            raise GitOperationError("not_found", f"no such note: {path!r}")
+        if not full.is_file():
+            raise GitOperationError("invalid_path", f"not a regular file: {path!r}")
+        full.unlink()
+    return {"vault": name, "path": posix.as_posix(), "deleted": True}

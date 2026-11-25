@@ -54,6 +54,10 @@ for svc in traefik ignis webdav git-ui git-mcp; do
   state="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk -v s="$svc" '$1==s{print $2}')"
   check "service $svc healthy" "healthy" "${state:-missing}"
 done
+if docker compose ps -a --format '{{.Service}}' | grep -qx 'openai-tunnel'; then
+  state="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$1=="openai-tunnel"{print $2}')"
+  check "service openai-tunnel healthy" "healthy" "${state:-missing}"
+fi
 
 echo "== configuration"
 check "compose config renders" "0" "$(docker compose config --quiet >/dev/null 2>&1; echo $?)"

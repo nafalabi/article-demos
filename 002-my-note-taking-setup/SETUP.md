@@ -84,6 +84,7 @@ $EDITOR .env
 | `MCP_AUTH_TOKEN` | bearer token clients present to the MCP endpoint; required, 32+ random characters |
 | `MCP_GIT_TOKEN` | the MCP server's own push token; separate from `GIT_TOKEN` so it can be revoked independently (empty is allowed until a remote is used) |
 | `MCP_GIT_AUTHOR_NAME`, `MCP_GIT_AUTHOR_EMAIL` | author identity attached to agent commits (defaults: `hermes`, `hermes@homelab.local`) |
+| `CONTROL_PLANE_TUNNEL_ID`, `CONTROL_PLANE_API_KEY` | optional OpenAI Secure MCP Tunnel ID and restricted runtime key (`Tunnels Read + Use`), required only when starting with `--profile openai` |
 
 Generate each token with:
 
@@ -262,21 +263,29 @@ A generic client configuration looks like this:
 }
 ```
 
-The server exposes six tools:
+The server exposes eleven tools — five for reading and editing notes, and six
+for git operations:
 
 | Tool | What it does |
 | --- | --- |
 | `list_vaults` | lists configured vaults, branch, and whether a remote is configured |
+| `list_notes` | lists note files (`.md`, `.markdown`, `.txt`, `.canvas`) in a vault, optionally under a `prefix` |
+| `read_note` | reads a UTF-8 note file from a vault (up to 256 KiB by default) |
+| `search_notes` | case-insensitive search across note paths and UTF-8 contents |
+| `write_note` | creates or overwrites a UTF-8 note file (supports `overwrite=false` for create-only) |
+| `delete_note` | deletes a regular note file (pair with `git_commit` to record the deletion) |
 | `git_status` | branch, upstream, ahead/behind, and changed paths |
 | `git_diff` | working-tree or staged diff, optionally for one path |
 | `git_log` | recent commits |
 | `git_commit` | commits only the named files with the agent author identity |
 | `git_push` | pushes the configured branch; never force-pushes |
 
-The intended workflow is: write a note over Ignis or WebDAV, inspect it with
-`git_status`/`git_diff`, commit it with `git_commit`, then `git_push`. `git_status`
-does not fetch; ahead/behind counts reflect the last fetch or successful push. For
-example, an agent that created `agent-note.md` calls:
+The intended workflow is: read or search notes with `list_notes` / `read_note` /
+`search_notes`, create or edit a note with `write_note` (or write over Ignis /
+WebDAV), inspect changes with `git_status` / `git_diff`, commit them with
+`git_commit`, then `git_push`. `git_status` does not fetch; ahead/behind counts
+reflect the last fetch or successful push. For example, an agent that created
+`agent-note.md` calls:
 
 ```json
 {"vault": "My Vault", "message": "add agent note", "paths": ["agent-note.md"]}
@@ -290,12 +299,58 @@ stays staged and out of the agent's commit. Commits are authored as
 `repos.conf`. If the remote moved in the meantime, the push fails with
 `push_rejected`; pull in lazygit, then retry.
 
-**Security.** The endpoint is token-gated and has no shell. It can only reach
-vaults listed in `repos.conf`, cannot reset, checkout, or force-push, and its git
-commands ignore hooks, fsmonitor, textconv, and gpg signing. A `.git` file or
-symlink inside a vault is refused rather than followed. Anyone with
-`MCP_AUTH_TOKEN` can still read diffs, commit, and push those vaults, so treat it
-as a secret.
+**Security.** The endpoint is token-gated and has no shell. Note tools and git
+tools can only reach vaults listed in `repos.conf`, reject `..`, `.git`,
+`.obsidian`, and symlinks, restrict note reads/writes/deletes to `.md`,
+`.markdown`, `.txt`, and `.canvas` files (256 KiB UTF-8 limit by default),
+cannot reset, checkout, or force-push, and ignore git hooks, fsmonitor,
+textconv, and gpg signing. A `.git` file or symlink inside a vault is refused
+rather than followed. Anyone with `MCP_AUTH_TOKEN` (or access to an attached
+tunnel) can read/edit notes, commit, and push those vaults, so treat both
+`MCP_AUTH_TOKEN` and `CONTROL_PLANE_API_KEY` as secrets.
+
+### Connect ChatGPT via OpenAI Secure MCP Tunnel
+
+Because ChatGPT runs in OpenAI's cloud, it cannot reach a private LAN IP or
+trust a local `mkcert` certificate. Instead of exposing ports to the public
+internet, this stack includes an optional `openai-tunnel` service running
+OpenAI's official outbound-only `tunnel-client` (`ghcr.io/openai/tunnel-client`):
+
+```
+ChatGPT ─▶ OpenAI Control Plane ◀═(outbound HTTPS)═ openai-tunnel ─▶ http://git-mcp:8080/mcp
+```
+
+`openai-tunnel` connects outbound to `api.openai.com:443` and forwards MCP calls
+over the private `notes` Docker network to `git-mcp`, injecting
+`Authorization: Bearer <MCP_AUTH_TOKEN>` via `MCP_EXTRA_HEADERS` (with
+`MCP_OAUTH_DISCOVERY=disabled`). That header is sent only to `git-mcp` and never
+forwarded to OpenAI.
+
+1. In the OpenAI Platform (**Organization Settings -> Tunnels**), create a
+   tunnel and copy its `tunnel_id` (`tunnel_...`). Link it to the ChatGPT
+   workspace you want to use.
+2. Create a **Restricted API Key** with **Tunnels Read + Use** permissions.
+3. Put both in `.env`:
+
+   ```dotenv
+   CONTROL_PLANE_TUNNEL_ID=tunnel_...
+   CONTROL_PLANE_API_KEY=sk-...
+   ```
+
+4. Start (or recreate) the stack with the `openai` profile enabled:
+
+   ```bash
+   docker compose --profile openai up -d --build
+   docker compose --profile openai ps
+   ```
+
+   Wait until `notes-openai-tunnel` shows `(healthy)` (checked via
+   `http://127.0.0.1:8080/readyz` inside the container). If it stays unhealthy,
+   inspect `docker compose --profile openai logs openai-tunnel`.
+5. In ChatGPT (**Settings -> Connectors / Apps -> Developer Mode**), add a
+   custom MCP connector using **Tunnel** and enter your `CONTROL_PLANE_TUNNEL_ID`.
+6. Test in ChatGPT by asking it to list your vaults, write a test note in
+   `My Vault`, and commit and push it (if a remote is configured in step 7).
 
 To rotate, replace `MCP_AUTH_TOKEN` in `.env` and recreate the service:
 
@@ -313,14 +368,16 @@ returns `no_credentials`.
 ./scripts/verify.sh
 ```
 
-24 checks, one `PASS`/`FAIL` line each, non-zero exit if anything fails. It reads
-`.env` the same way Compose does and changes nothing. It covers: all five
-containers healthy; the Traefik dashboard reachable only on `127.0.0.1`; both
-browser apps answering directly; plain HTTP redirecting to HTTPS; MCP health,
-token rejection, and an authenticated initialize; the isolation headers; WebDAV
-rejecting missing and wrong credentials and listing your vault; `.git` being
-unreadable and unwritable over WebDAV; no credentials left in vault remotes; and
-a WebDAV write landing in the directory Ignis serves.
+24 core checks (plus an `openai-tunnel` health check when `--profile openai` is
+running), one `PASS`/`FAIL` line each, non-zero exit if anything fails. It reads
+`.env` the same way Compose does and changes nothing. It covers: all five core
+containers healthy (and `openai-tunnel` if present); the Traefik dashboard
+reachable only on `127.0.0.1`; both browser apps answering directly; plain HTTP
+redirecting to HTTPS; MCP health, token rejection, and an authenticated
+initialize; the isolation headers; WebDAV rejecting missing and wrong
+credentials and listing your vault; `.git` being unreadable and unwritable over
+WebDAV; no credentials left in vault remotes; and a WebDAV write landing in the
+directory Ignis serves.
 
 One thing it cannot check is what the browser does with the certificate: **graph
 view rendering is the proof that the secure context is real.** If graph view is
@@ -329,15 +386,17 @@ missing, the client does not trust mkcert's CA — install `rootCA.pem` there.
 ## 10. Everyday commands
 
 ```bash
-docker compose up -d      # start
-docker compose ps         # what is running, and whether each one is healthy
-docker compose logs -f    # follow everything
+docker compose up -d                    # start core stack
+docker compose --profile openai up -d   # start core stack + OpenAI tunnel
+docker compose ps                       # what is running, and whether each one is healthy
+docker compose logs -f                  # follow everything
 docker compose logs -f ignis
-docker compose down       # stop; your notes and config stay
+docker compose down                     # stop; your notes and config stay
 ```
 
 "Healthy" is each container's own self-test: Traefik's ping endpoint, WebDAV's
-port, Ignis's HTTP root, ttyd answering, and the MCP `/health` endpoint.
+port, Ignis's HTTP root, ttyd answering, the MCP `/health` endpoint, and (when
+enabled) the tunnel client's `/readyz` endpoint.
 
 ## 11. When it goes wrong
 

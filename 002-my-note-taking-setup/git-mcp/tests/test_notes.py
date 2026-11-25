@@ -146,3 +146,43 @@ def test_delete_note_and_commit_flow(tmp_path):
     with pytest.raises(GitOperationError) as exc:
         notes.delete_note(settings, "My Vault", "adir.md")
     assert exc.value.code == "invalid_path"
+
+
+def test_explicit_config_files_allowed_without_affecting_listings(tmp_path):
+    settings, vault = make_settings(tmp_path)
+
+    written_gitignore = notes.write_note(
+        settings, "My Vault", ".gitignore", ".obsidian/workspace.json\n"
+    )
+    assert written_gitignore["path"] == ".gitignore"
+    assert notes.read_note(settings, "My Vault", ".gitignore")["content"] == ".obsidian/workspace.json\n"
+
+    written_ws = notes.write_note(
+        settings, "My Vault", ".obsidian/workspace.json", '{"main": {}}\n'
+    )
+    assert written_ws["path"] == ".obsidian/workspace.json"
+    assert notes.read_note(settings, "My Vault", ".obsidian/workspace.json")["content"] == '{"main": {}}\n'
+
+    # Backward compatibility: list_notes and search_notes still exclude .obsidian and non-note files.
+    listed_paths = [item["path"] for item in notes.list_notes(settings, "My Vault")["notes"]]
+    assert ".gitignore" not in listed_paths
+    assert ".obsidian/workspace.json" not in listed_paths
+    assert notes.search_notes(settings, "My Vault", "workspace")["matches"] == []
+
+    # Nested .obsidian plugin files and non-JSON files in .obsidian stay blocked.
+    for blocked in (
+        ".obsidian/app.md",
+        ".obsidian/plugins/demo/data.json",
+        ".obsidian/plugins/demo/main.js",
+        ".git/config",
+        "sub/.gitignore",
+    ):
+        with pytest.raises(GitOperationError) as exc:
+            notes.read_note(settings, "My Vault", blocked)
+        assert exc.value.code == "invalid_path"
+
+    c = vaults.commit(settings, "My Vault", "update gitignore", [".gitignore"])
+    assert c["files"] == [".gitignore"]
+
+    assert notes.delete_note(settings, "My Vault", ".obsidian/workspace.json")["deleted"] is True
+    assert not (vault / ".obsidian" / "workspace.json").exists()

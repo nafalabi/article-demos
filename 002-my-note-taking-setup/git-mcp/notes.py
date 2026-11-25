@@ -8,6 +8,19 @@ from vaults import GitOperationError, _lock_for, resolve_vault, vault_path
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".markdown", ".txt", ".canvas"})
 EXCLUDED_DIRS = frozenset({".git", ".obsidian"})
+EXPLICIT_ROOT_CONFIGS = frozenset({".gitignore", ".gitattributes"})
+
+
+def _is_explicit_config_path(posix: PurePosixPath) -> bool:
+    if len(posix.parts) == 1 and posix.parts[0] in EXPLICIT_ROOT_CONFIGS:
+        return True
+    if (
+        len(posix.parts) == 2
+        and posix.parts[0] == ".obsidian"
+        and posix.suffix.lower() == ".json"
+    ):
+        return True
+    return False
 
 
 def _require_vault_dir(settings: Settings, name: str) -> Path:
@@ -18,7 +31,9 @@ def _require_vault_dir(settings: Settings, name: str) -> Path:
     return directory
 
 
-def _validate_rel_parts(raw: str, *, allow_empty: bool = False) -> Path:
+def _validate_rel_parts(
+    raw: str, *, allow_empty: bool = False, allow_obsidian: bool = False
+) -> Path:
     if not raw or not raw.strip():
         if allow_empty:
             return Path()
@@ -29,7 +44,9 @@ def _validate_rel_parts(raw: str, *, allow_empty: bool = False) -> Path:
     if rel.is_absolute() or not rel.parts:
         raise GitOperationError("invalid_path", f"unsafe path: {raw!r}")
     for part in rel.parts:
-        if part in (".", "..") or part in EXCLUDED_DIRS:
+        if part in (".", "..") or part == ".git":
+            raise GitOperationError("invalid_path", f"unsafe path component: {raw!r}")
+        if part == ".obsidian" and not allow_obsidian:
             raise GitOperationError("invalid_path", f"unsafe path component: {raw!r}")
     return rel
 
@@ -48,13 +65,16 @@ def _check_no_symlinks(root: Path, rel: Path) -> Path:
 
 
 def _validate_note_path(directory: Path, raw: str) -> tuple[PurePosixPath, Path]:
-    rel = _validate_rel_parts(raw, allow_empty=False)
+    rel = _validate_rel_parts(raw, allow_empty=False, allow_obsidian=True)
     posix = PurePosixPath(*rel.parts)
-    if posix.suffix.lower() not in ALLOWED_EXTENSIONS:
-        raise GitOperationError(
-            "invalid_path",
-            f"unsupported note extension for {raw!r}; allowed: {sorted(ALLOWED_EXTENSIONS)}",
-        )
+    if not _is_explicit_config_path(posix):
+        if ".obsidian" in posix.parts:
+            raise GitOperationError("invalid_path", f"unsafe path component: {raw!r}")
+        if posix.suffix.lower() not in ALLOWED_EXTENSIONS:
+            raise GitOperationError(
+                "invalid_path",
+                f"unsupported note extension for {raw!r}; allowed: {sorted(ALLOWED_EXTENSIONS)}",
+            )
     full = _check_no_symlinks(directory, rel)
     return posix, full
 

@@ -64,11 +64,22 @@ def make_settings(
     return settings, vault
 
 
-async def call_asgi(app, path: str, headers: list[tuple[bytes, bytes]]) -> int | None:
+async def call_asgi(
+    app,
+    path: str,
+    headers: list[tuple[bytes, bytes]],
+    method: str = "POST",
+    body: bytes = b"",
+) -> int | None:
     response: dict[str, object] = {}
+    sent = False
 
     async def receive() -> dict[str, object]:
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
 
     async def send(message: dict[str, object]) -> None:
         if message["type"] == "http.response.start":
@@ -78,7 +89,7 @@ async def call_asgi(app, path: str, headers: list[tuple[bytes, bytes]]) -> int |
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
-        "method": "POST",
+        "method": method,
         "scheme": "http",
         "path": path,
         "raw_path": path.encode(),

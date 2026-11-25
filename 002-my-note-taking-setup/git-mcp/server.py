@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import Settings, parse_repos_conf
+import notes
 import vaults
 
 logger = logging.getLogger("git-mcp")
@@ -66,6 +67,35 @@ def build_server(settings: Settings) -> MCPServer:
         return {"vaults": call("list_vaults", None, vaults.list_vaults)}
 
     @mcp.tool()
+    def list_notes(vault: str, prefix: str | None = None) -> dict[str, object]:
+        """List note files (.md, .markdown, .txt, .canvas) in a vault, excluding .git and .obsidian."""
+        return call("list_notes", vault, notes.list_notes, vault, prefix)
+
+    @mcp.tool()
+    def read_note(vault: str, path: str) -> dict[str, object]:
+        """Read a UTF-8 note file from a vault."""
+        return call("read_note", vault, notes.read_note, vault, path)
+
+    @mcp.tool()
+    def search_notes(
+        vault: str, query: str, prefix: str | None = None, limit: int = 20
+    ) -> dict[str, object]:
+        """Case-insensitively search note filenames and contents in a vault."""
+        return call("search_notes", vault, notes.search_notes, vault, query, prefix, limit)
+
+    @mcp.tool()
+    def write_note(
+        vault: str, path: str, content: str, overwrite: bool = True
+    ) -> dict[str, object]:
+        """Create or update a UTF-8 note file in a vault."""
+        return call("write_note", vault, notes.write_note, vault, path, content, overwrite)
+
+    @mcp.tool()
+    def delete_note(vault: str, path: str) -> dict[str, object]:
+        """Delete a regular note file from a vault."""
+        return call("delete_note", vault, notes.delete_note, vault, path)
+
+    @mcp.tool()
     def git_status(vault: str) -> dict[str, object]:
         """Show branch, upstream, ahead/behind, and changed paths for a vault.
 
@@ -113,6 +143,8 @@ def create_app(settings: Settings):
         allowed_hosts=[
             settings.public_host,
             f"{settings.public_host}:*",
+            "git-mcp",
+            "git-mcp:*",
             "127.0.0.1",
             "127.0.0.1:*",
             "localhost",
